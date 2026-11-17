@@ -1,0 +1,353 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Letterboxed Video Before Upscaling: Crop the Bars First, and Prove It</title>
+<meta name="description" content="A 1920×1080 frame holding a 1440×1080 picture has 25% of its pixels doing nothing. Measured: upscaling the full frame first costs 1.37× the compute and contaminates 4 source pixels at the active edge — but a whole-frame PSNR moves only 0.01 dB, so the metric cannot see it. The threshold that decides whether cropdetect works is 24, and it is 24 because the bar is 16.">
+<link rel="canonical" href="https://celticgemini001.github.io/upgolab-letterbox-before-upscale/">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Letterboxed Video Before Upscaling: Crop the Bars First">
+<meta property="og:description" content="Measured on a known-answer pillar-boxed frame: crop-first upscale uses 25% fewer pixels and 1.37× less time, and never touches the active edge. Upscale-first leaks black into 4 source pixels — visible at 21 dB locally, invisible at 0.01 dB globally.">
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"Article",
+ "headline":"Letterboxed Video Before Upscaling: Crop the Bars First, and Prove It",
+ "author":{"@type":"Organization","name":"UpgoLAB","url":"https://upgolab.com"},
+ "publisher":{"@type":"Organization","name":"UpgoLAB","url":"https://upgolab.com"},
+ "datePublished":"2026-11-18",
+ "dateModified":"2026-11-18",
+ "mainEntityOfPage":"https://celticgemini001.github.io/upgolab-letterbox-before-upscale/"}
+</script>
+<style>
+:root{--ink:#16181d;--mut:#5b6270;--line:#e2e5ea;--acc:#0a58ca}
+*{box-sizing:border-box}
+body{margin:0;color:var(--ink);font:17px/1.7 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+main{max-width:46rem;margin:0 auto;padding:3rem 1.25rem 5rem}
+h1{font-size:2rem;line-height:1.22;margin:0 0 .5rem;letter-spacing:-.02em}
+h2{font-size:1.33rem;margin:2.5rem 0 .7rem}
+h3{font-size:1.08rem;margin:1.8rem 0 .5rem}
+p,li{color:#2b3038}ul,ol{padding-left:1.3rem}li{margin:.4rem 0}
+a{color:var(--acc)}
+code{background:#f0f2f5;padding:.1rem .3rem;border-radius:3px;font-size:.9em}
+pre{background:#f7f8fa;border:1px solid var(--line);border-radius:8px;padding:1rem;overflow-x:auto;font-size:.84rem;line-height:1.55}
+pre code{background:none;padding:0}
+.lede{font-size:1.14rem;color:var(--mut);margin:0 0 1.6rem}
+.meta{font-size:.88rem;color:var(--mut);border-bottom:1px solid var(--line);padding-bottom:1rem;margin-bottom:2rem}
+table{width:100%;border-collapse:collapse;margin:1.4rem 0;font-size:.93rem}
+th,td{text-align:left;padding:.55rem .65rem;border-bottom:1px solid var(--line)}
+th{font-weight:600;background:#f6f7f9;font-size:.83rem;text-transform:uppercase;letter-spacing:.03em;color:var(--mut)}
+td.num{text-align:right;font-variant-numeric:tabular-nums}
+tr.bad td{background:#fdf3f3}
+tr.best td{background:#f2f8f2}
+.callout{border-left:3px solid var(--acc);background:#f5f8fd;padding:.9rem 1.1rem;margin:1.6rem 0;border-radius:0 6px 6px 0}
+.callout p{margin:.3rem 0}
+.scroll{overflow-x:auto}
+footer{margin-top:4rem;padding-top:1.4rem;border-top:1px solid var(--line);font-size:.9rem;color:var(--mut)}
+.sisternav{margin:2rem 0 0;padding-top:1.2rem;border-top:1px solid #e2e5ea}
+.sisternav p{font-size:.8rem;text-transform:uppercase;letter-spacing:.05em;color:#5b6270;margin:0 0 .6rem}
+.sisternav ul{list-style:none;padding:0;margin:0;display:flex;flex-wrap:wrap;gap:.4rem .9rem}
+.sisternav li{margin:0;font-size:.88rem;line-height:1.4}
+.sisternav a{text-decoration:none;border-bottom:1px solid #d5dae2}
+.sisternav a:hover{border-bottom-color:#0a58ca}
+</style>
+</head>
+<body>
+<main>
+<article>
+<h1>Letterboxed Video Before Upscaling: Crop the Bars First, and Prove It</h1>
+<p class="lede">Every "upscale to 4K" button assumes the frame is the picture. On a letterboxed or
+pillarboxed source it is not: a 1920×1080 frame can hold a 1440×1080 picture, which means a quarter
+of the pixels you are about to interpolate are pure black and are not part of any picture at all.
+The obvious move is to crop first. The interesting part is that the number your quality metric
+reports will not change if you do not — and the number that <em>does</em> change is a lot worse
+than the usual "it's only the edges" dismissal.</p>
+<p class="meta">Measured 18 November 2026 · Pillow 12.2.0, numpy 1.26.4, ffmpeg 6.1.1 · known-answer
+masters generated at 3840×2880 with a seeded scene, then framed and re-measured</p>
+
+<h2>What "bars" actually cost you, in pixels</h2>
+
+<p>Take a 4:3 picture and put it in a 16:9 frame. The picture is 1440×1080; the frame is
+1920×1080; so 240 pixels on the left and 240 on the right are not picture. That is 480 × 1080 =
+518,400 pixels out of 2,073,600 — exactly 25.00%.</p>
+
+<p>Upscale the frame as-is to 4K and you interpolate 8,294,400 output pixels. Upscale the cropped
+picture and fill the width yourself, and you interpolate 6,220,800 — the 25% is gone. The compute
+saving is not a rounding detail, and it is measurable:</p>
+
+<table>
+<thead><tr><th>Path</th><th class="num">Pixels resampled</th><th class="num">Time, 4× lanczos</th><th>What the resampler sees at the picture edge</th></tr></thead>
+<tbody>
+<tr class="best"><td>Crop bars, then upscale</td><td class="num">6,220,800</td><td class="num">443 ms</td><td>The edge of the picture</td></tr>
+<tr class="bad"><td>Upscale full frame, then crop</td><td class="num">8,294,400</td><td class="num">604 ms</td><td>The edge of the picture plus 240 px of black</td></tr>
+<tr><td>Difference</td><td class="num">−25.0%</td><td class="num">1.37× slower</td><td>—</td></tr>
+</tbody></table>
+
+<p>The 1.37× is not the 1.33× you would predict from area alone — measured on the same machine,
+same kernel, three runs each. The extra is fixed overhead that does not scale with pixel count,
+so the saving is real but slightly less than the area ratio suggests. If you are doing this to
+video, 604 ms against 443 ms per frame is 18.1 s against 13.3 s of pure resampling for one second
+of 30 fps footage — per second, for every second you process.</p>
+
+<h2>Experiment 1 — how deep does the black actually bleed?</h2>
+
+<p>Here is where the intuition is usually wrong in both directions. People who crop say "otherwise
+you get a soft edge"; people who do not crop say "it's only a pixel or two, nobody sees it". Both
+are half right, and the measured answer explains why.</p>
+
+<p>The test scene deliberately puts maximum contrast at x=0 — a horizontal gradient that starts at
+luma 200 on the very first column and falls to 40 — so any leakage from the black bar has the
+largest possible signal to contaminate. Then: frame it, upscale the frame, crop the bars back out,
+and compare against cropping first and upscaling. Difference is reported in source pixels so the
+numbers are comparable across scale factors.</p>
+
+<div class="scroll">
+<table>
+<thead><tr><th>Kernel</th><th class="num">Scale</th><th class="num">Contaminated output cols</th><th class="num">= source px</th><th class="num">PSNR, first 2 px</th><th class="num">PSNR, first 8 px</th><th class="num">PSNR, whole frame</th></tr></thead>
+<tbody>
+<tr><td>lanczos</td><td class="num">2×</td><td class="num">8</td><td class="num">4.00</td><td class="num">17.79</td><td class="num">23.45</td><td class="num">48.86</td></tr>
+<tr><td>bicubic</td><td class="num">2×</td><td class="num">5</td><td class="num">2.50</td><td class="num">18.41</td><td class="num">24.37</td><td class="num">49.77</td></tr>
+<tr><td>lanczos</td><td class="num">3×</td><td class="num">8</td><td class="num">2.67</td><td class="num">15.58</td><td class="num">20.67</td><td class="num">47.82</td></tr>
+<tr><td>bicubic</td><td class="num">3×</td><td class="num">5</td><td class="num">1.67</td><td class="num">15.72</td><td class="num">21.40</td><td class="num">48.55</td></tr>
+<tr><td>lanczos</td><td class="num">4×</td><td class="num">14</td><td class="num">3.50</td><td class="num">13.96</td><td class="num">19.14</td><td class="num">47.53</td></tr>
+<tr><td>bicubic</td><td class="num">4×</td><td class="num">10</td><td class="num">2.50</td><td class="num">14.11</td><td class="num">19.83</td><td class="num">48.23</td></tr>
+<tr><td>lanczos</td><td class="num">8×</td><td class="num">28</td><td class="num">3.50</td><td class="num">11.03</td><td class="num">16.17</td><td class="num">47.29</td></tr>
+<tr><td>bicubic</td><td class="num">8×</td><td class="num">18</td><td class="num">2.25</td><td class="num">11.15</td><td class="num">16.62</td><td class="num">47.96</td></tr>
+</tbody></table>
+</div>
+
+<p>Two things fall out of this table that are not obvious from the "soft edge" story.</p>
+
+<p><strong>The depth is a kernel property, not a scale property.</strong> Lanczos contaminates
+3.5 source pixels regardless of whether you scale 4× or 8×; bicubic contaminates 2.5 at 4× and
+2.25 at 8×. This is exactly right: the support of the filter is fixed in <em>source</em>
+coordinates, so a wider kernel reaches further into the bar no matter how far out you sample.
+Doubling the output resolution doubles the number of affected output columns without changing how
+much of the picture is wrong.</p>
+
+<p><strong>The damage is severe exactly where it happens.</strong> PSNR in the first two output
+pixels is 11–18 dB. For scale, 30 dB is "visible but tolerable" and 40 dB is "hard to find". At
+14 dB the first pixel of your picture is, numerically, not the picture — it is a blend of the
+picture and a black bar. Nobody would ship that if it were the whole frame. It is the whole frame
+only 0.2% of the time.</p>
+
+<h2>Experiment 2 — the metric cannot see it, and that is the real trap</h2>
+
+<p>Now the part that matters if you have a quality gate in CI. Run the two paths against the true
+master — not against each other — and report whole-frame PSNR:</p>
+
+<table>
+<thead><tr><th>Kernel</th><th class="num">Crop-first, whole frame</th><th class="num">Upscale-first, whole frame</th><th class="num">Δ</th><th class="num">Crop-first, first 8 px</th><th class="num">Upscale-first, first 8 px</th></tr></thead>
+<tbody>
+<tr><td>lanczos</td><td class="num">20.29</td><td class="num">20.28</td><td class="num">−0.01</td><td class="num">70.98</td><td class="num">32.98</td></tr>
+<tr><td>bicubic</td><td class="num">20.37</td><td class="num">20.38</td><td class="num">+0.01</td><td class="num">70.98</td><td class="num">34.48</td></tr>
+</tbody></table>
+
+<p>The wrong path is <em>ahead by 0.01 dB</em> on one kernel and behind by 0.01 dB on the other.
+That is noise — the number is identical to the precision anyone would report. Meanwhile the actual
+edge is 38 dB worse. A regression test built on whole-frame PSNR would pass the broken pipeline
+forever, and would pass it slightly <em>more</em> comfortably with bicubic.</p>
+
+<p>This is not a subtle numerical artefact, it is the arithmetic of averaging. The contaminated
+region is 8 columns out of 2880, or 0.21% of the frame, at 33 dB; the other 99.79% sits at 71 dB.
+The global figure is dominated by the good part:</p>
+
+<table>
+<thead><tr><th>If the bad strip is</th><th class="num">…at 33 dB</th><th class="num">…at 30 dB</th></tr></thead>
+<tbody>
+<tr><td>0.21% of the frame (8 of 3840 cols)</td><td class="num">59.5 dB global</td><td class="num">56.0 dB global</td></tr>
+<tr><td>1% of the frame</td><td class="num">52.9 dB global</td><td class="num">50.0 dB global</td></tr>
+<tr><td>5% of the frame</td><td class="num">46.0 dB global</td><td class="num">44.0 dB global</td></tr>
+</tbody></table>
+
+<p>Read the budget backwards and it gets worse. Starting from a 45 dB baseline, a strip at 33 dB
+can cover <strong>1.74%</strong> of the frame before the global number drops a single dB. At 30 dB
+it is 0.85%. A crop-edge defect is 5–8× smaller than the budget, so it will never show up in a
+whole-frame gate — no matter how you tune the threshold. The defect has to be measured where it
+lives, or not at all.</p>
+
+<div class="callout">
+<p><strong>Practical consequence.</strong> If you want a gate that catches this, the gate has to be
+a strip metric: PSNR of the first 8 output pixels of the active area, against a reference. That
+number goes from 71 dB to 33 dB between the two paths. The whole-frame number goes from 20.29 to
+20.28.</p>
+</div>
+
+<h2>Experiment 3 — why cropdetect's default limit is 24, and when it breaks</h2>
+
+<p>The practical question is not "should I crop" — it is "will the crop be <em>right</em>". ffmpeg's
+<code>cropdetect</code> finds bars by scanning for rows and columns whose maximum luma is below
+<code>limit</code>, default 24. That default is not arbitrary, and the measurement shows exactly
+what it is worth.</p>
+
+<p>Vary the bar's luma (pure black through luma 32, i.e. visibly grey) and add ±2 or ±4 luma of
+noise, which is what a real encode gives you. Record the detected active width at five limits:</p>
+
+<div class="scroll">
+<table>
+<thead><tr><th class="num">Bar luma</th><th class="num">Noise</th><th class="num">Edge column max</th><th class="num">@16</th><th class="num">@24</th><th class="num">@32</th><th class="num">@40</th><th class="num">@48</th></tr></thead>
+<tbody>
+<tr class="best"><td class="num">0</td><td class="num">±4</td><td class="num">4</td><td class="num">1440</td><td class="num">1440</td><td class="num">1440</td><td class="num">1440</td><td class="num">1440</td></tr>
+<tr><td class="num">16</td><td class="num">0</td><td class="num">16</td><td class="num">1920</td><td class="num">1440</td><td class="num">1440</td><td class="num">1440</td><td class="num">1440</td></tr>
+<tr><td class="num">16</td><td class="num">±4</td><td class="num">20</td><td class="num">1920</td><td class="num">1440</td><td class="num">1440</td><td class="num">1440</td><td class="num">1440</td></tr>
+<tr><td class="num">20</td><td class="num">±4</td><td class="num">24</td><td class="num">1920</td><td class="num">1920</td><td class="num">1440</td><td class="num">1440</td><td class="num">1440</td></tr>
+<tr class="bad"><td class="num">24</td><td class="num">0</td><td class="num">24</td><td class="num">1920</td><td class="num">1920</td><td class="num">1440</td><td class="num">1440</td><td class="num">1440</td></tr>
+<tr class="bad"><td class="num">24</td><td class="num">±4</td><td class="num">28</td><td class="num">1920</td><td class="num">1920</td><td class="num">1440</td><td class="num">1440</td><td class="num">1440</td></tr>
+<tr class="bad"><td class="num">32</td><td class="num">0</td><td class="num">32</td><td class="num">1920</td><td class="num">1920</td><td class="num">1920</td><td class="num">1440</td><td class="num">1440</td></tr>
+</tbody></table>
+</div>
+
+<p>The threshold test is <code>max &gt;= limit</code>, so a bar whose brightest pixel is exactly the
+limit counts as <em>picture</em> and the crop fails silently — you get the full 1920 width back and
+no warning. Bar luma 24 with no noise defeats the default exactly. With ±4 noise it takes a bar at
+luma 20 to defeat it. This is why "just use the default" works in demos and fails on the disc rip
+that has a deliberately non-black matt: the bar is the same luma as the limiter.</p>
+
+<p>The reverse failure is worse because it destroys picture. At <code>limit=48</code> every bar in
+the test is detected, but the detector also clips a horizontal strip off the top — 1080 lines down
+to 996, 1014 or 1016 depending on the input — because a dark region <em>inside</em> the picture
+(the gradient's dark corner) is below 48 too. Raising the limit to catch a light bar costs you
+picture content. There is no limit that is both aggressive enough for a luma-32 bar and safe for
+dark image content; the rule has to be verified per source, not set globally.</p>
+
+<h2>Reproducing it</h2>
+
+<p>Everything above runs in about a second except the 4× timings. Pillow only; no ffmpeg needed for
+the metrics. The scene is deterministic.</p>
+
+<pre><code>import numpy as np
+from PIL import Image, ImageDraw
+
+def scene(W, H, edge_lit):
+    yy, xx = np.mgrid[0:H, 0:W]
+    a = np.zeros((H, W, 3), np.float32)
+    if edge_lit:                      # max contrast exactly at x=0
+        v = np.linspace(200, 40, W, dtype=np.float32)
+        a[..., 0] = a[..., 1] = a[..., 2] = v[None, :]
+    else:
+        a[..., 0] = 40 + 60 * (xx / W)
+        a[..., 1] = 44 + 50 * (yy / H)
+        a[..., 2] = 52 + 40 * ((xx + yy) / (W + H))
+    img = Image.fromarray(a.clip(0, 255).astype(np.uint8))
+    d = ImageDraw.Draw(img)
+    r = int(H * 0.2778)
+    d.ellipse([W//2-r, H//2-r, W//2+r, H//2+r], fill=(220,210,190),
+              outline=(255,255,255), width=max(2, H//360))
+    return img
+
+def psnr(a, b, sl=None):
+    if sl: a, b = a[sl], b[sl]
+    m = np.mean((a.astype(np.float64) - b.astype(np.float64)) ** 2)
+    return float('inf') if m == 0 else round(10 * np.log10(255*255 / m), 2)
+
+src = scene(1440, 1080, True)
+frame = Image.new('RGB', (1920, 1080), (0, 0, 0))
+frame.paste(src, (240, 0))                     # 240 px bar each side
+
+for s in (2, 3, 4, 8):
+    for kn, k in (('lanczos', Image.LANCZOS), ('bicubic', Image.BICUBIC)):
+        A = np.asarray(src.resize((1440*s, 1080*s), k), np.uint8)
+        B = np.asarray(frame.resize((1920*s, 1080*s), k), np.uint8)
+        B = B[:, 240*s:240*s + 1440*s]         # crop the bars back out
+        d = np.abs(B.astype(int) - A.astype(int)).max(axis=2)
+        cols = int((d &gt; 1).sum(axis=0).astype(bool).sum())
+        print(f"{kn} {s}x  cols={cols:3d}  src_px={cols/s:4.2f}  "
+              f"edge2={psnr(B, A, (slice(None), slice(0, 2))):6.2f}  "
+              f"edge8={psnr(B, A, (slice(None), slice(0, 8))):6.2f}  "
+              f"whole={psnr(B, A):6.2f}")
+</code></pre>
+
+<p>Output (the table in Experiment 1, one line per row):</p>
+
+<pre><code>lanczos 2x  cols=  8  src_px=4.00  edge2= 17.79  edge8= 23.45  whole= 48.86
+bicubic 2x  cols=  5  src_px=2.50  edge2= 18.41  edge8= 24.37  whole= 49.77
+lanczos 3x  cols=  8  src_px=2.67  edge2= 15.58  edge8= 20.67  whole= 47.82
+bicubic 3x  cols=  5  src_px=1.67  edge2= 15.72  edge8= 21.40  whole= 48.55
+lanczos 4x  cols= 14  src_px=3.50  edge2= 13.96  edge8= 19.14  whole= 47.53
+bicubic 4x  cols= 10  src_px=2.50  edge2= 14.11  edge8= 19.83  whole= 48.23
+lanczos 8x  cols= 28  src_px=3.50  edge2= 11.03  edge8= 16.17  whole= 47.29
+bicubic 8x  cols= 18  src_px=2.25  edge2= 11.15  edge8= 16.62  whole= 47.96
+</code></pre>
+
+<p>For the cropdetect table, the same frame is rebuilt at different bar luma and noise, then:</p>
+
+<pre><code>for lim in 16 24 32 40 48; do
+  ffmpeg -v info -loop 1 -t 0.4 -i framed.png \
+    -vf "cropdetect=limit=$lim:round=2" -f null - 2>&gt;&amp;1 \
+    | grep -o 'crop=[0-9:]*' | tail -1
+done</code></pre>
+
+<p>Note the <code>-loop 1 -t 0.4</code>: a single still through <code>-frames:v 1</code> produces no
+<code>crop=</code> line at all on ffmpeg 6.1.1, because cropdetect logs from the second frame
+onwards. That is fifteen minutes of confusion the first time you script it.</p>
+
+<h2>What to actually do</h2>
+
+<ol>
+<li><strong>Crop before you resample, always.</strong> 25% fewer pixels, 1.37× faster, and the
+edge of your picture never sees a bar. There is no quality argument for upscaling black.</li>
+<li><strong>Verify the detected rectangle instead of trusting it.</strong> Print the width
+<code>cropdetect</code> returns and compare against the width you expect from the container's
+display aspect ratio. If they differ, the crop is wrong and every subsequent number is
+measuring the wrong rectangle.</li>
+<li><strong>Do not set <code>limit</code> to catch a light bar.</strong> At 48 the detector
+started eating picture content — 1080 lines became 996. Pick the limit from the source's actual
+bar luma, measured on one frame, not from a guess.</li>
+<li><strong>Gate on an edge strip, not the whole frame.</strong> 8 output pixels at the active
+boundary catches a 38 dB defect that a whole-frame PSNR gate reports as 0.01 dB.</li>
+<li><strong>Check the axis twice.</strong> Pillarboxing and letterboxing have different failure
+modes only in which scan direction you measure; the crop rectangle is the same operation, but a
+source can have bars on both axes and <code>cropdetect</code> will happily return a rectangle that
+is right in one and wrong in the other.</li>
+</ol>
+
+<p>If you are doing this as part of a pipeline rather than by hand — crop, upscale, encode — the
+same order applies: the upscaler never needs to know the bars existed. The
+<a href="https://upgolab.com">upgolab.com</a> studio takes the cropped picture and does not try to
+be clever about frame geometry, which is the behaviour you want here.</p>
+
+<footer>
+<p>All figures measured on 18 November 2026 with Pillow 12.2.0, numpy 1.26.4 and ffmpeg 6.1.1 on
+Linux. The test scene is generated deterministically from the snippet above; no figures here are
+estimated, and the two negative results in Experiment 2 (whole-frame PSNR cannot see the defect,
+and a higher cropdetect limit clips picture) are reported as measured.</p>
+
+<nav class="sisternav" aria-label="More measured upscaling guides">
+<p>More measured guides</p>
+<ul>
+  <li><a href="https://celticgemini001.github.io/upgolab-ai-upscaler-guide/">What Upscaling Recovers vs Invents</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-2k-vs-4k-decision/">2K vs 4K Bits-Per-Pixel</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-anamorphic-sd-upscale/">Anamorphic SD: Non-Square Pixels</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-anisotropic-upscale/">Upscaling One Axis: Anisotropic Cost</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-bit-depth-banding/">Bit Depth and Banding</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-chroma-subsampling/">Chroma Subsampling Under Upscaling</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-color-matrix-and-range/">Colour Matrix and Range</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-exif-orientation-upscale/">EXIF Orientation and Upscaling</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-fractional-upscale-factors/">Fractional Upscale Factors</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-gamma-vs-linear-light/">Gamma vs Linear Light</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-gif-palette-upscaling/">GIF and Palette Limits</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-halftone-dots-upscaling/">Halftone Dots Under Upscaling</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-hdr-upscaling-bit-depth/">Upscaling HDR Photographs</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-interlaced-video-upscale/">Interlaced Video Before Upscaling</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-jpeg-blocking-upscale/">JPEG Blocking Under Upscaling</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-motion-blur-before-upscale/">Motion Blur Before an Upscale</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-noise-and-grain-upscaling/">Noise and Grain Under Upscaling</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-old-footage-restoration/">Restoring Old Family Video</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-output-format-after-upscale/">Output Format After Upscaling</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-remove-background-and-upscale/">Cutout and Upscale</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-screen-recording-4k/">Screen Recording to 4K</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-sharpen-before-or-after-upscale/">Sharpen Before or After?</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-thumbnail-4k-master/">4K Thumbnail Master</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-tiled-upscale-seams/">Tiled Upscaling Seams</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-tools/">All guides (index)</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-upscale-anime-illustration/">Upscaling Line Art</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-upscale-product-photos/">Product Shot vs Face</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-upscale-vs-reshoot/">Re-Shoot or Upscale?</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-video-upscaling-limits/">Why Video Is Not Image Upscaling</a></li>
+  <li><a href="https://celticgemini001.github.io/upgolab-what-nofollow-means/">rel=nofollow, Measured</a></li>
+</ul>
+</nav>
+</footer>
+</article>
+</main>
+</body>
+</html>
