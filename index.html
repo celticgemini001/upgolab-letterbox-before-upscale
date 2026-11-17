@@ -4,18 +4,18 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Letterboxed Video Before Upscaling: Crop the Bars First, and Prove It</title>
-<meta name="description" content="A 1920×1080 frame holding a 1440×1080 picture has 25% of its pixels doing nothing. Measured: upscaling the full frame first costs 1.37× the compute and contaminates 4 source pixels at the active edge — but a whole-frame PSNR moves only 0.01 dB, so the metric cannot see it. The threshold that decides whether cropdetect works is 24, and it is 24 because the bar is 16.">
+<meta name="description" content="A 1920×1080 frame holding a 1440×1080 picture has 25% of its pixels doing nothing. Measured: upscaling the full frame first costs 1.37× the compute and contaminates 3.5 source pixels at the active edge — but a whole-frame PSNR moves only 0.01 dB, so the metric cannot see it. Also measured: cropdetect's threshold is a truncated mean, not a maximum, so a bar is defeated by lighting 105 of its 1080 rows, not by one bright pixel.">
 <link rel="canonical" href="https://celticgemini001.github.io/upgolab-letterbox-before-upscale/">
 <meta property="og:type" content="article">
 <meta property="og:title" content="Letterboxed Video Before Upscaling: Crop the Bars First">
-<meta property="og:description" content="Measured on a known-answer pillar-boxed frame: crop-first upscale uses 25% fewer pixels and 1.37× less time, and never touches the active edge. Upscale-first leaks black into 4 source pixels — visible at 21 dB locally, invisible at 0.01 dB globally.">
+<meta property="og:description" content="Measured on a known-answer pillar-boxed frame: crop-first upscale uses 25% fewer pixels and 1.37× less time, and never touches the active edge. Upscale-first leaks black into 3.5 source pixels — visible at 13 dB locally, invisible at 0.01 dB globally. Plus a correction: cropdetect tests a truncated mean, so its failure mode is area, not brightness.">
 <script type="application/ld+json">
 {"@context":"https://schema.org","@type":"Article",
  "headline":"Letterboxed Video Before Upscaling: Crop the Bars First, and Prove It",
  "author":{"@type":"Organization","name":"UpgoLAB","url":"https://upgolab.com"},
  "publisher":{"@type":"Organization","name":"UpgoLAB","url":"https://upgolab.com"},
  "datePublished":"2026-11-18",
- "dateModified":"2026-11-18",
+ "dateModified":"2026-11-18T04:00:00+07:00",
  "mainEntityOfPage":"https://celticgemini001.github.io/upgolab-letterbox-before-upscale/"}
 </script>
 <style>
@@ -128,7 +128,9 @@ much of the picture is wrong.</p>
 pixels is 11–18 dB. For scale, 30 dB is "visible but tolerable" and 40 dB is "hard to find". At
 14 dB the first pixel of your picture is, numerically, not the picture — it is a blend of the
 picture and a black bar. Nobody would ship that if it were the whole frame. It is the whole frame
-only 0.2% of the time.</p>
+only 0.2% of the time. The depth figure is 3.5 source pixels at 4× (14 output columns) and 3.5 at 8×
+(28 output columns) — the earlier version of this paragraph said "4 source pixels", which is the 2×
+number, and the header said the same; both are corrected here.</p>
 
 <h2>Experiment 2 — the metric cannot see it, and that is the real trap</h2>
 
@@ -175,39 +177,195 @@ number goes from 71 dB to 33 dB between the two paths. The whole-frame number go
 <h2>Experiment 3 — why cropdetect's default limit is 24, and when it breaks</h2>
 
 <p>The practical question is not "should I crop" — it is "will the crop be <em>right</em>". ffmpeg's
-<code>cropdetect</code> finds bars by scanning for rows and columns whose maximum luma is below
-<code>limit</code>, default 24. That default is not arbitrary, and the measurement shows exactly
-what it is worth.</p>
-
-<p>Vary the bar's luma (pure black through luma 32, i.e. visibly grey) and add ±2 or ±4 luma of
-noise, which is what a real encode gives you. Record the detected active width at five limits:</p>
+<code>cropdetect</code> finds bars by deciding, for each line, whether that line is bar or picture.
+The default limit is <code>24.0/255</code>, i.e. 24 of 255. Measured on constant-luma bars, sweeping
+bar luma against limit, the detected width is:</p>
 
 <div class="scroll">
 <table>
-<thead><tr><th class="num">Bar luma</th><th class="num">Noise</th><th class="num">Edge column max</th><th class="num">@16</th><th class="num">@24</th><th class="num">@32</th><th class="num">@40</th><th class="num">@48</th></tr></thead>
+<thead><tr><th class="num">Bar luma</th><th class="num">@8</th><th class="num">@16</th><th class="num">@24</th><th class="num">@32</th><th class="num">@40</th><th class="num">@48</th></tr></thead>
 <tbody>
-<tr class="best"><td class="num">0</td><td class="num">±4</td><td class="num">4</td><td class="num">1440</td><td class="num">1440</td><td class="num">1440</td><td class="num">1440</td><td class="num">1440</td></tr>
-<tr><td class="num">16</td><td class="num">0</td><td class="num">16</td><td class="num">1920</td><td class="num">1440</td><td class="num">1440</td><td class="num">1440</td><td class="num">1440</td></tr>
-<tr><td class="num">16</td><td class="num">±4</td><td class="num">20</td><td class="num">1920</td><td class="num">1440</td><td class="num">1440</td><td class="num">1440</td><td class="num">1440</td></tr>
-<tr><td class="num">20</td><td class="num">±4</td><td class="num">24</td><td class="num">1920</td><td class="num">1920</td><td class="num">1440</td><td class="num">1440</td><td class="num">1440</td></tr>
-<tr class="bad"><td class="num">24</td><td class="num">0</td><td class="num">24</td><td class="num">1920</td><td class="num">1920</td><td class="num">1440</td><td class="num">1440</td><td class="num">1440</td></tr>
-<tr class="bad"><td class="num">24</td><td class="num">±4</td><td class="num">28</td><td class="num">1920</td><td class="num">1920</td><td class="num">1440</td><td class="num">1440</td><td class="num">1440</td></tr>
-<tr class="bad"><td class="num">32</td><td class="num">0</td><td class="num">32</td><td class="num">1920</td><td class="num">1920</td><td class="num">1920</td><td class="num">1440</td><td class="num">1440</td></tr>
+<tr class="best"><td class="num">16</td><td class="num">1920</td><td class="num">1440</td><td class="num">1440</td><td class="num">1440</td><td class="num">1424</td><td class="num">1354</td></tr>
+<tr class="best"><td class="num">20</td><td class="num">1920</td><td class="num">1920</td><td class="num">1440</td><td class="num">1440</td><td class="num">1424</td><td class="num">1354</td></tr>
+<tr class="best"><td class="num">24</td><td class="num">1920</td><td class="num">1920</td><td class="num">1440</td><td class="num">1440</td><td class="num">1424</td><td class="num">1354</td></tr>
+<tr class="bad"><td class="num">25</td><td class="num">1920</td><td class="num">1920</td><td class="num">1920</td><td class="num">1440</td><td class="num">1424</td><td class="num">1354</td></tr>
+<tr class="bad"><td class="num">32</td><td class="num">1920</td><td class="num">1920</td><td class="num">1920</td><td class="num">1440</td><td class="num">1424</td><td class="num">1354</td></tr>
+<tr class="bad"><td class="num">40</td><td class="num">1920</td><td class="num">1920</td><td class="num">1920</td><td class="num">1920</td><td class="num">1424</td><td class="num">1354</td></tr>
 </tbody></table>
 </div>
 
-<p>The threshold test is <code>max &gt;= limit</code>, so a bar whose brightest pixel is exactly the
-limit counts as <em>picture</em> and the crop fails silently — you get the full 1920 width back and
-no warning. Bar luma 24 with no noise defeats the default exactly. With ±4 noise it takes a bar at
-luma 20 to defeat it. This is why "just use the default" works in demos and fails on the disc rip
-that has a deliberately non-black matt: the bar is the same luma as the limiter.</p>
+<p>1920 means nothing was cropped. Two things are worth reading off this table. First, the crop
+stays correct up to a bar luma <em>equal</em> to the limit — 24 at limit 24, 32 at limit 32 — and
+breaks at one luma step above it. So the default tolerates a bar of exactly 24, not "just under 24".
+Second, the last two columns are not a failure to crop but a failure to <em>stop</em>: at limit 40 and
+48 the detector returns 1424 and 1354, i.e. it has walked past the bar and eaten 16 and 86 columns of
+picture. Raising the limit to catch a light bar always costs picture at the far end, because the
+detector runs into genuinely dark image content and cannot tell it from a bar.</p>
 
-<p>The reverse failure is worse because it destroys picture. At <code>limit=48</code> every bar in
-the test is detected, but the detector also clips a horizontal strip off the top — 1080 lines down
-to 996, 1014 or 1016 depending on the input — because a dark region <em>inside</em> the picture
-(the gradient's dark corner) is below 48 too. Raising the limit to catch a light bar costs you
-picture content. There is no limit that is both aggressive enough for a luma-32 bar and safe for
-dark image content; the rule has to be verified per source, not set globally.</p>
+<div class="callout">
+<p><strong>Correction.</strong> An earlier version of this page stated the rule as "a column is bar
+while its <em>maximum</em> luma is below the limit, so a bar whose brightest pixel is exactly the
+limit counts as picture", and published a table in which a bar at luma 24 defeated
+<code>limit=24</code>. That table does not reproduce with the command printed beneath it, and the
+rule was wrong. The statistic is a <em>truncated mean</em> over the line, and the comparison is
+strictly greater-than. Experiment 4 below derives both from the filter source and measures the
+consequence, which is a failure condition on <em>area</em>, not on brightness.</p>
+</div>
+
+<h2>Experiment 4 — the cropdetect rule I published here was wrong, and here is the corrected one</h2>
+
+<p>An earlier version of this page said the threshold test was "a column is bar while its
+<em>maximum</em> luma is below the limit, so a bar whose brightest pixel is exactly the limit counts
+as picture". That is not what ffmpeg does, and it does not reproduce. Re-running the page's own
+command on ffmpeg 6.1.1 gives a bar at luma 24 detected correctly at the default limit, which the
+old table said was impossible. So the rule was measured properly instead of assumed.</p>
+
+<p>Read from source (<code>libavfilter/vf_cropdetect.c</code>, n6.1), <code>checkline()</code> sums
+every pixel of the line and returns <code>total / div</code> — an integer <em>mean</em> over the
+column or row, not a maximum. The scan loop then tests it strictly:</p>
+
+<pre><code>static int checkline(void *ctx, const unsigned char *src, int stride, int len, int bpp)
+{
+    ...
+    total /= div;              /* integer mean of the whole column */
+    return total;
+}
+#define FIND(DST, FROM, NOEND, INC, STEP0, STEP1, LEN)
+    for (last_y = y = FROM; NOEND; y = y INC) {
+        if (checkline(ctx, ..., LEN, bpp) &gt; limit_upscaled) {   /* strictly greater */
+            if (++outliers &gt; s-&gt;max_outliers) { DST = last_y; break; }
+        } else
+            last_y = y INC;
+    }</code></pre>
+
+<p>With <code>max_outliers</code> defaulting to 0, a single column above the limit ends the search.
+So the operational rule is: <strong>a line is bar while its truncated mean luma is ≤ limit; one line
+whose mean exceeds the limit stops the crop there.</strong> The default is not "24" as a luma
+value either — it is <code>24.0/255</code>, a <em>fraction of full scale</em>, which is the source of
+the 10-bit bug below.</p>
+
+<table>
+<thead><tr><th>Bar</th><th class="num">Column mean</th><th class="num">Column max</th><th class="num">Detected w</th><th class="num">Result</th></tr></thead>
+<tbody>
+<tr class="best"><td>constant 24</td><td class="num">24.00</td><td class="num">24.0</td><td class="num">1440</td><td class="num">cropped</td></tr>
+<tr class="bad"><td>constant 25</td><td class="num">25.00</td><td class="num">25.0</td><td class="num">1920</td><td class="num">no crop</td></tr>
+<tr class="best"><td>one bright row out of 1080</td><td class="num">0.24</td><td class="num">255.0</td><td class="num">1440</td><td class="num">cropped</td></tr>
+<tr class="bad"><td>one bright column each side</td><td class="num">1.06</td><td class="num">255.0</td><td class="num">1920</td><td class="num">no crop</td></tr>
+<tr class="bad"><td>108 bright rows (10%)</td><td class="num">25.50</td><td class="num">255.0</td><td class="num">1920</td><td class="num">no crop</td></tr>
+<tr class="bad"><td>540 bright rows (50%)</td><td class="num">127.50</td><td class="num">255.0</td><td class="num">1920</td><td class="num">no crop</td></tr>
+</tbody></table>
+
+<p>The first three rows kill the max hypothesis outright: a bar containing a single pixel at 255 is
+still cropped, because one bright pixel in 1080 moves the mean by 0.24. The last row kills the
+opposite reading — it is not "any bright pixel is enough" either. What matters is <em>how much of
+the line</em> is bright, because that is all a mean can see.</p>
+
+<p>That makes the failure condition a fraction, not a brightness. Holding everything else fixed and
+lighting only <em>n</em> of the 1080 rows in the bar at 255:</p>
+
+<table>
+<thead><tr><th class="num">Bright rows</th><th class="num">255·n/1080</th><th class="num">truncated</th><th class="num">Detected w</th></tr></thead>
+<tbody>
+<tr class="best"><td class="num">104</td><td class="num">24.56</td><td class="num">24</td><td class="num">1440</td></tr>
+<tr class="best"><td class="num">105</td><td class="num">24.79</td><td class="num">24</td><td class="num">1440</td></tr>
+<tr class="bad"><td class="num">106</td><td class="num">25.03</td><td class="num">25</td><td class="num">1920</td></tr>
+<tr class="bad"><td class="num">107</td><td class="num">25.26</td><td class="num">25</td><td class="num">1920</td></tr>
+</tbody></table>
+
+<p>The crossover is at exactly 105 rows: 9.7% of the frame height. Not "a bright pixel", not
+"the brightest pixel" — <strong>a tenth of the bar lit at full white</strong>. That is the failure
+that actually happens in the wild: a bar that is black on average but carries a highlight, a logo,
+or a burnt-in timestamp in one region pushes the mean over and the detector returns the full width
+with no warning.</p>
+
+<h3>The two settings that break it silently</h3>
+
+<p><strong>1. <code>limit</code> is a fraction when it is below 1.0.</strong> The option default is
+<code>24.0/255</code>, and <code>config_input()</code> rescales only in that branch:</p>
+
+<pre><code>if (s-&gt;limit &lt; 1.0)
+    s-&gt;limit_upscaled = s-&gt;limit * ((1 &lt;&lt; s-&gt;bitdepth) - 1);
+else
+    s-&gt;limit_upscaled = s-&gt;limit;      /* raw code value, whatever the depth */</code></pre>
+
+<p>So <code>limit=24</code> means code 24 in <em>this</em> pixel format. On 8-bit that is luma 24; on
+10-bit it is 24 of 1023, which in 8-bit terms is about 6 — a far stricter threshold than intended.
+Measured on the same picture encoded lossless as <code>yuv444p10le</code>, with the limit passed as a
+raw code value the crop survives only while the bar is at or below luma 6 and starts failing at luma
+8 — a bar that is merely "video black" at 16 is not cropped at all. Passing the correct fraction
+<code>limit=0.094</code> (24/255 ≈ 96/1023) restores the 8-bit behaviour exactly: luma 24 is cropped
+at 1440 and luma 25 is not.</p>
+
+<table>
+<thead><tr><th class="num">Bar luma (8-bit terms)</th><th class="num">limit=24 (raw code)</th><th class="num">limit=0.094 (fraction)</th></tr></thead>
+<tbody>
+<tr class="best"><td class="num">0</td><td class="num">1440</td><td class="num">1440</td></tr>
+<tr class="best"><td class="num">6</td><td class="num">1440</td><td class="num">1440</td></tr>
+<tr class="bad"><td class="num">8</td><td class="num">1920</td><td class="num">1440</td></tr>
+<tr class="bad"><td class="num">16</td><td class="num">1920</td><td class="num">1440</td></tr>
+<tr class="bad"><td class="num">24</td><td class="num">1920</td><td class="num">1440</td></tr>
+<tr class="bad"><td class="num">25</td><td class="num">1920</td><td class="num">1920</td></tr>
+</tbody></table>
+
+<p>The last row is the sanity check that the two configurations agree where they should: both stop
+cropping at luma 25. Everything above it is the bug — on 10-bit source the default-shaped
+<code>limit=24</code> refuses to crop any bar a real encoder would produce.</p>
+
+<p><strong>2. <code>round</code> defaults to 16, and it eats picture.</strong> A 1440×1080 picture
+with real bars gives a clean rect at <code>round=2</code>, but the default <code>round=16</code>
+returns <code>1440×1072</code> at <code>y=4</code> — four rows of picture gone, which realigns every
+subsequent comparison by 4. At <code>round=32</code> it is <code>1440×1056</code> at
+<code>y=12</code>.</p>
+
+<table>
+<thead><tr><th>Setting</th><th class="num">Detected rect</th><th class="num">Picture lost</th></tr></thead>
+<tbody>
+<tr class="best"><td><code>round=2</code></td><td class="num">1440×1080 +240+0</td><td class="num">0 rows</td></tr>
+<tr class="bad"><td><code>round=16</code> (default)</td><td class="num">1440×1072 +240+4</td><td class="num">4 rows</td></tr>
+<tr class="bad"><td><code>round=32</code></td><td class="num">1440×1056 +240+12</td><td class="num">12 rows</td></tr>
+</tbody></table>
+
+<p>Both errors are unrecoverable after the fact. Once the rectangle is wrong, every metric
+downstream — including the strip metric from Experiment 2 — is measuring a different rectangle than
+the one you think you are measuring, and it will report a perfectly healthy number while doing it.</p>
+
+<p>Reproduce all of it — the frame builder, the mean/max specimens and the row crossover:</p>
+
+<pre><code>import numpy as np, subprocess, tempfile
+from PIL import Image
+
+def framed(bar=0.0, bright_rows=0, W=1920, H=1080, PW=1440):
+    rng = np.random.default_rng(3)
+    yy, xx = np.mgrid[0:H, 0:PW]
+    v = np.clip(200 - 160*(xx/(PW-1)) + rng.normal(0, 6, (H, PW)), 0, 255)
+    f = np.zeros((H, W, 3)); f[..., :] = bar
+    f[:, (W-PW)//2:(W+PW)//2] = np.repeat(v[..., None], 3, 2)
+    if bright_rows:                       # light the TOP rows of both bars only
+        f[:bright_rows, :(W-PW)//2] = 255; f[:bright_rows, (W+PW)//2:] = 255
+    return f
+
+def detect(f, limit="24", rnd=2):
+    with tempfile.TemporaryDirectory() as td:
+        p = f"{td}/f.png"; Image.fromarray(f.astype(np.uint8)).save(p)
+        r = subprocess.run(["ffmpeg","-hide_banner","-loop","1","-i",p,"-vf",
+             f"cropdetect=limit={limit}:round={rnd},metadata=mode=print",
+             "-frames:v","6","-f","null","-"], capture_output=True, text=True)
+    return r.stderr
+
+for rows in (0, 105, 106):
+    out = detect(framed(bright_rows=rows))
+    print(rows, [l.split("crop=")[-1] for l in out.splitlines() if "crop=" in l][-1])
+</code></pre>
+
+<p>Output, matching the tables above verbatim:</p>
+
+<pre><code>0 1440:1080:240:0
+105 1440:1080:240:0
+106 1920:1080:0:0
+</code></pre>
+
+<p>Note <code>-frames:v 6</code> rather than 1 — cropdetect's default <code>skip</code> is 2, so a
+single frame produces no <code>crop=</code> line at all.</p>
 
 <h2>Reproducing it</h2>
 
@@ -268,7 +426,8 @@ lanczos 8x  cols= 28  src_px=3.50  edge2= 11.03  edge8= 16.17  whole= 47.29
 bicubic 8x  cols= 18  src_px=2.25  edge2= 11.15  edge8= 16.62  whole= 47.96
 </code></pre>
 
-<p>For the cropdetect table, the same frame is rebuilt at different bar luma and noise, then:</p>
+<p>For the cropdetect grids in Experiments 3 and 4, the same frame is rebuilt at different bar
+luma, then:</p>
 
 <pre><code>for lim in 16 24 32 40 48; do
   ffmpeg -v info -loop 1 -t 0.4 -i framed.png \
@@ -277,8 +436,8 @@ bicubic 8x  cols= 18  src_px=2.25  edge2= 11.15  edge8= 16.62  whole= 47.96
 done</code></pre>
 
 <p>Note the <code>-loop 1 -t 0.4</code>: a single still through <code>-frames:v 1</code> produces no
-<code>crop=</code> line at all on ffmpeg 6.1.1, because cropdetect logs from the second frame
-onwards. That is fifteen minutes of confusion the first time you script it.</p>
+<code>crop=</code> line at all on ffmpeg 6.1.1, because cropdetect skips the first
+<code>skip=2</code> frames. That is fifteen minutes of confusion the first time you script it.</p>
 
 <h2>What to actually do</h2>
 
@@ -289,9 +448,13 @@ edge of your picture never sees a bar. There is no quality argument for upscalin
 <code>cropdetect</code> returns and compare against the width you expect from the container's
 display aspect ratio. If they differ, the crop is wrong and every subsequent number is
 measuring the wrong rectangle.</li>
-<li><strong>Do not set <code>limit</code> to catch a light bar.</strong> At 48 the detector
-started eating picture content — 1080 lines became 996. Pick the limit from the source's actual
-bar luma, measured on one frame, not from a guess.</li>
+<li><strong>Do not set <code>limit</code> to catch a light bar.</strong> At 40 and 48 the detector
+walked past the bar and ate 16 and 86 columns of <em>picture</em> on the same frame. Pick the limit
+from the source's actual bar luma, measured on one frame, not from a guess — and prefer fixing the
+bar (crush it to true black) over raising the threshold.</li>
+<li><strong>Pass the limit as a fraction on &gt;8-bit source, and set <code>round=2</code>.</strong>
+<code>limit=24</code> on 10-bit means code 24 of 1023, not luma 24 of 255, and the default
+<code>round=16</code> trims real picture rows to a multiple of 16.</li>
 <li><strong>Gate on an edge strip, not the whole frame.</strong> 8 output pixels at the active
 boundary catches a 38 dB defect that a whole-frame PSNR gate reports as 0.01 dB.</li>
 <li><strong>Check the axis twice.</strong> Pillarboxing and letterboxing have different failure
@@ -307,9 +470,12 @@ be clever about frame geometry, which is the behaviour you want here.</p>
 
 <footer>
 <p>All figures measured on 18 November 2026 with Pillow 12.2.0, numpy 1.26.4 and ffmpeg 6.1.1 on
-Linux. The test scene is generated deterministically from the snippet above; no figures here are
-estimated, and the two negative results in Experiment 2 (whole-frame PSNR cannot see the defect,
-and a higher cropdetect limit clips picture) are reported as measured.</p>
+Linux. The test scene is generated deterministically from the snippets above; no figures here are
+estimated. Three negative results are reported as measured rather than smoothed over: whole-frame
+PSNR cannot see the crop-edge defect (Experiment 2), raising <code>cropdetect</code>'s limit eats
+picture instead of bars (Experiments 3 and 4), and the rule this page originally published for
+<code>cropdetect</code> was wrong and did not reproduce (Experiment 4). The last one is stated
+because a wrong rule that reproduces as "correct" is more dangerous than a missing one.</p>
 
 <nav class="sisternav" aria-label="More measured upscaling guides">
 <p>More measured guides</p>
