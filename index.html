@@ -4,18 +4,18 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Letterboxed Video Before Upscaling: Crop the Bars First, and Prove It</title>
-<meta name="description" content="A 1920×1080 frame holding a 1440×1080 picture has 25% of its pixels doing nothing. Measured: upscaling the full frame first costs 1.37× the compute and contaminates 3.5 source pixels at the active edge — but a whole-frame PSNR moves only 0.01 dB, so the metric cannot see it. Also measured: cropdetect's threshold is a truncated mean, not a maximum, so a bar is defeated by lighting 105 of its 1080 rows, not by one bright pixel.">
+<meta name="description" content="A 1920×1080 frame holding a 1440×1080 picture has 25% of its pixels doing nothing. Measured: upscaling the full frame first costs 1.37× the compute and contaminates 3.5 source pixels at the active edge, while whole-frame PSNR moves 0.01 dB. cropdetect's threshold is a truncated mean, not a maximum — and on a clip its rectangle is a running union that can never tighten: 1 correct frame out of 298 on a narrowing picture, 19.22 dB whole-frame.">
 <link rel="canonical" href="https://celticgemini001.github.io/upgolab-letterbox-before-upscale/">
 <meta property="og:type" content="article">
 <meta property="og:title" content="Letterboxed Video Before Upscaling: Crop the Bars First">
-<meta property="og:description" content="Measured on a known-answer pillar-boxed frame: crop-first upscale uses 25% fewer pixels and 1.37× less time, and never touches the active edge. Upscale-first leaks black into 3.5 source pixels — visible at 13 dB locally, invisible at 0.01 dB globally. Plus a correction: cropdetect tests a truncated mean, so its failure mode is area, not brightness.">
+<meta property="og:description" content="Measured on a known-answer pillar-boxed frame: crop-first upscale uses 25% fewer pixels and 1.37× less time, and never touches the active edge. Upscale-first leaks black into 3.5 source pixels — 13 dB locally, 0.01 dB globally. Plus two corrections: cropdetect tests a truncated mean, so its failure mode is area not brightness; and on a clip the rectangle only ever grows, so bars that appear after frame 0 are never cropped.">
 <script type="application/ld+json">
 {"@context":"https://schema.org","@type":"Article",
  "headline":"Letterboxed Video Before Upscaling: Crop the Bars First, and Prove It",
  "author":{"@type":"Organization","name":"UpgoLAB","url":"https://upgolab.com"},
  "publisher":{"@type":"Organization","name":"UpgoLAB","url":"https://upgolab.com"},
  "datePublished":"2026-11-18",
- "dateModified":"2026-11-18T04:00:00+07:00",
+ "dateModified":"2026-11-19T02:00:00+07:00",
  "mainEntityOfPage":"https://celticgemini001.github.io/upgolab-letterbox-before-upscale/"}
 </script>
 <style>
@@ -60,8 +60,10 @@ pillarboxed source it is not: a 1920×1080 frame can hold a 1440×1080 picture, 
 of the pixels you are about to interpolate are pure black and are not part of any picture at all.
 The obvious move is to crop first. The interesting part is that the number your quality metric
 reports will not change if you do not — and the number that <em>does</em> change is a lot worse
-than the usual "it's only the edges" dismissal.</p>
-<p class="meta">Measured 18 November 2026 · Pillow 12.2.0, numpy 1.26.4, ffmpeg 6.1.1 · known-answer
+than the usual "it's only the edges" dismissal. The second half of the job, detecting the
+rectangle, is where the real failures live: <code>cropdetect</code> returns a box that only ever
+grows, so on a picture that becomes letterboxed after the first frame the crop is never right again.</p>
+<p class="meta">Measured 18–19 November 2026 · Pillow 12.2.0, numpy 1.26.4, ffmpeg 6.1.1 · known-answer
 masters generated at 3840×2880 with a seeded scene, then framed and re-measured</p>
 
 <h2>What "bars" actually cost you, in pixels</h2>
@@ -367,10 +369,197 @@ for rows in (0, 105, 106):
 <p>Note <code>-frames:v 6</code> rather than 1 — cropdetect's default <code>skip</code> is 2, so a
 single frame produces no <code>crop=</code> line at all.</p>
 
+<h2>Experiment 5 — on a clip the rectangle only ever grows, and that is the bug that ships</h2>
+
+<p>Experiments 1–4 treat <code>cropdetect</code> as a function of one frame. In a pipeline it is a
+function of the clip, and it is not "find the letterbox". Each scan starts at the <em>current</em> box
+edge and is bounded by it, so a frame can only claim area the box does not already contain: the
+rectangle is a running union, and it can never tighten again.</p>
+
+<pre><code>#define FIND(DST, FROM, NOEND, INC, STEP0, STEP1, LEN) \
+    outliers = 0; \
+    for (last_y = y = FROM; NOEND; y = y INC) { \
+        if (checkline(ctx, frame-&gt;data[0] + STEP0*y, STEP1, LEN, bpp) &gt; limit_upscaled) { \
+            if (++outliers &gt; s-&gt;max_outliers) { DST = last_y; break; } \
+        } else last_y = y INC; \
+    }
+
+FIND(s-&gt;x1, 0,               y &lt; s-&gt;x1,     +1, ...);   /* stops at the old x1 */
+FIND(s-&gt;x2, frame-&gt;width-1,  y &gt; s-&gt;x2,     -1, ...);   /* stops at the old x2 */</code></pre>
+
+<p>If frame 0 is full-frame, <code>x1 = 0</code> and <code>x2 = 1919</code>, and then
+<code>y &lt; s-&gt;x1</code> is false before the loop body ever runs. The loop does not execute at all.
+Nothing can push those edges back in for the rest of the file. If frame 0 is letterboxed the reverse
+works — a later full frame scans outward and widens the box — so the operation is monotone: <strong>bars
+that appear later are never cropped</strong>, and bars that disappear later are. That asymmetry is the
+finding, and it is the opposite of what "detect the letterbox" implies.</p>
+
+<p>Measured on six rendered clips, 10 s each, 1920×1080, 300 frames, x264 CRF 12. "Correct" is counted
+per frame against the ground-truth rectangle for that frame, on the 298 frames the detector reports
+(it skips 2 by default):</p>
+
+<div class="scroll">
+<table>
+<thead><tr><th>Clip (10 s, 300 frames)</th><th class="num">Default correct</th><th class="num"><code>reset=1</code></th><th>Last rect, default</th><th>Truth, last frame</th></tr></thead>
+<tbody>
+<tr class="best"><td>steady 1440×1080 in 1920</td><td class="num">298/298</td><td class="num">298/298</td><td>1440:1080:240:0</td><td>1440</td></tr>
+<tr class="bad"><td>picture narrows 1560 → 1440</td><td class="num">1/298</td><td class="num">298/298</td><td>1552:1080:184:0</td><td>1440</td></tr>
+<tr class="bad"><td>open matte 1920 → matted 1440</td><td class="num">148/298</td><td class="num">298/298</td><td>1920:1080:0:0</td><td>1440</td></tr>
+<tr class="best"><td>matted 1440 → open matte 1920</td><td class="num">298/298</td><td class="num">298/298</td><td>1920:1080:0:0</td><td>1920</td></tr>
+<tr class="best"><td>1 s black leader, then 1440</td><td class="num">270/270</td><td class="num">270/270</td><td>1440:1080:240:0</td><td>1440</td></tr>
+<tr class="best"><td>0.5 s fade in, then 1440</td><td class="num">296/298</td><td class="num">298/298</td><td>1440:1080:240:0</td><td>1440</td></tr>
+</tbody></table>
+</div>
+
+<p>Row 2 is the one to sit with: <strong>1 correct frame out of 298</strong>. Frame 0 is 1560 wide, the
+box is set to 1552 and never moves, so for 267 frames it crops a 1440-wide picture as if it were 1552.
+Row 3 is the same bug through a harder edit — full-frame for ten seconds, then matted, and the matte
+is never seen. Row 4 passes for the trivial reason that the picture ended up touching the frame edge,
+which is where the box already was; it is not evidence that the detector tracked anything.</p>
+
+<p><code>reset=1</code> is 298/298 on all six and costs nothing measurable. On a 36 s 1080p clip: bare
+decode 1.34 s, plain <code>cropdetect</code> 1.77 s, <code>reset=1</code> 1.76 s — the two detector
+runs differ by less than run-to-run noise — against 12.19 s for the 4× lanczos resample of the same
+clip. You are paying 0.43 s to answer a question about the end of the clip.</p>
+
+<p>A two-probe shortcut — one second from the head, one from the tail, intersect the rectangles —
+looks attractive at 0.19 s per probe. It fails in the opposite direction, structurally: an
+intersection can only shrink, so it under-crops exactly when the picture grows. Against the same
+ground truth it scores 298, 270, 150, 148, <strong>0</strong> and 298 correct out of 298 on the six
+clips — wrong on the two clips the default gets right, and returning no rectangle at all for the
+black leader. On the matted → open-matte clip it hands you 1440 for a picture that ends at 1920 and
+silently deletes 240 columns. Conservative is not the same as correct.</p>
+
+<h3>What a wide union costs when you keep the bar</h3>
+
+<p>Keep the bar and resize the crop to a fixed output width — what every pipeline does — and the
+picture is stretched by the ratio the detector got wrong. For the narrowing clip the union is 1552
+where the picture is 1440: 56 source columns of bar each side, 7.78% horizontal stretch at 4× output.
+Measured against the true 4× upscale of the 1440-wide picture:</p>
+
+<div class="scroll">
+<table>
+<thead><tr><th>Rect applied to a 1440-wide picture</th><th class="num">Output width</th><th class="num">Edge 8 px PSNR</th><th class="num">Whole-frame PSNR</th></tr></thead>
+<tbody>
+<tr class="best"><td>1440, per-frame (<code>reset=1</code>)</td><td class="num">5760</td><td class="num">identical</td><td class="num">identical</td></tr>
+<tr class="bad"><td>1552, union from frame 0</td><td class="num">5760</td><td class="num">11.98</td><td class="num">19.22</td></tr>
+</tbody></table>
+</div>
+
+<p>19.22 dB <em>whole frame</em>, not the 0.01 dB of Experiment 2, because this defect is geometric: it
+moves every pixel rather than 0.21% of them. The same arithmetic on the subtitle case above — keep the
+bottom bar, 916 rows instead of 816, so 10.9% of the crop is bar — gives a 12.25% vertical stretch at
+16.55 dB. A wrong rectangle is not a cosmetic defect; it is a resample of the wrong picture.</p>
+
+<h3>Two more ways the printed rectangle lies</h3>
+
+<p><strong>A clip that opens on black prints a negative rectangle.</strong> When no line passes the
+limit, the box never opens and the printed rect is literally:</p>
+
+<pre><code>crop=-1918:-1078:1920:1080</code></pre>
+
+<p>Because the box can only grow, it recovers to <code>1440:1080:240:0</code> the moment picture
+appears — but anything reading the <em>first</em> <code>crop=</code> line, which is the natural way to
+probe a clip, gets a rect the <code>crop</code> filter will not apply. Guard with
+<code>w &gt; 0 and h &gt; 0</code> and treat a degenerate rect as "unknown", never as "full frame".</p>
+
+<p><strong>A fade poisons the frames it covers.</strong> On the 0.5 s fade-in clip the first reported
+rectangle was <code>1022:604:658:238</code> — 39.7% of the picture's area, an implied 1.41× zoom — and
+2 of 298 frames came in under 90% area before the union caught up. Two frames is nothing when the rect
+is effectively fixed for the clip; it is a visible pulse if you crop per-frame with
+<code>reset=1</code> and no smoothing.</p>
+
+<h3>"Turn the rounding off" is not a thing</h3>
+
+<p>Since <code>round=16</code> costs four rows of picture (Experiment 4), the obvious fix is
+<code>round=1</code>. The source turns it back into 16 — <code>if (s-&gt;round &lt;= 1) s-&gt;round =
+16;</code> — before the modulo, so 0 and 1 both mean 16. Measured on a clean 1440×1080 picture inside a
+1920×1080 frame:</p>
+
+<div class="scroll">
+<table>
+<thead><tr><th class="num"><code>round</code></th><th>Detected rect</th><th class="num">Picture lost</th></tr></thead>
+<tbody>
+<tr class="bad"><td class="num">0</td><td>1440×1072 +240+4</td><td class="num">4 rows</td></tr>
+<tr class="bad"><td class="num">1</td><td>1440×1072 +240+4</td><td class="num">4 rows</td></tr>
+<tr class="best"><td class="num">2</td><td>1440×1080 +240+0</td><td class="num">0 rows</td></tr>
+<tr class="best"><td class="num">4</td><td>1440×1080 +240+0</td><td class="num">0 rows</td></tr>
+<tr class="best"><td class="num">8</td><td>1440×1080 +240+0</td><td class="num">0 rows</td></tr>
+<tr class="bad"><td class="num">16 (default)</td><td>1440×1072 +240+4</td><td class="num">4 rows</td></tr>
+<tr class="bad"><td class="num">32</td><td>1440×1056 +240+12</td><td class="num">12 rows</td></tr>
+</tbody></table>
+</div>
+
+<p>2, 4 and 8 are clean on this geometry; 0 and 1 are 16. <code>round=2</code> is the only value you
+can name without checking the frame size.</p>
+
+<h3>You cannot do it in one pass</h3>
+
+<p>Chaining detector into crop in a single filtergraph fails on 6.1.1, because the crop filter
+evaluates its width expression when the graph is configured, before any frame exists:</p>
+
+<pre><code>$ ffmpeg -i clip.mp4 -vf "cropdetect=round=2,crop=w='lavfi.cropdetect.w':h='lavfi.cropdetect.h'" out.mp4
+[Parsed_crop_1] Error when evaluating the expression 'lavfi.cropdetect.w'
+[vf#0:0] Error reinitializing filters!
+Conversion failed!  (exit 234)</code></pre>
+
+<p>Two passes, always: detect, read the rect, then crop. Which makes the rect you read worth getting
+right — 19.22 dB worth.</p>
+
+<p>Reproduce the section — the narrowing clip, the union, and the re-detecting answer:</p>
+
+<pre><code>import numpy as np, subprocess, tempfile
+from PIL import Image, ImageDraw
+
+W, H = 1920, 1080
+def scene(w, h):
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    a = np.zeros((h, w, 3), np.float32)
+    a[..., 0] = 40 + 90 * xx / max(w - 1, 1)
+    a[..., 1] = 44 + 70 * yy / max(h - 1, 1)
+    a[..., 2] = 52 + 60 * (xx + yy) / (w + h)
+    img = Image.fromarray(a.clip(0, 255).astype(np.uint8))
+    r = int(h * 0.28)
+    ImageDraw.Draw(img).ellipse([w//2-r, h//2-r, w//2+r, h//2+r],
+                                fill=(220, 210, 190), outline=(255, 255, 255), width=2)
+    return img
+
+def clip(widths, fps=30):                    # one PNG per frame, then encode
+    d = tempfile.mkdtemp()
+    for i, pw in enumerate(widths):
+        f = Image.new("RGB", (W, H), (0, 0, 0))
+        if pw: f.paste(scene(pw, H), ((W - pw) // 2, 0))
+        f.save(f"{d}/f{i:03d}.png")
+    out = f"{d}/c.mp4"
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-framerate", str(fps),
+                    "-i", f"{d}/f%03d.png", "-c:v", "libx264", "-crf", "12",
+                    "-pix_fmt", "yuv420p", out], check=True)
+    return out
+
+def detect(path, extra=""):
+    r = subprocess.run(["ffmpeg", "-hide_banner", "-i", path, "-vf",
+        f"cropdetect=round=2{extra},metadata=mode=print", "-f", "null", "-"],
+        capture_output=True, text=True)
+    return [l.rsplit("crop=", 1)[-1].strip()
+            for l in r.stderr.splitlines() if "crop=" in l]
+
+widths = [1560 - 4*i for i in range(31)] + [1440] * 269     # narrows, then holds
+v = clip(widths)
+print(len(set(detect(v))), detect(v)[-1])                   # 1 1552:1080:184:0
+print(len(set(detect(v, ":reset=1"))), detect(v, ":reset=1")[-1])   # 29 1440:1080:240:0</code></pre>
+
+<p>Output, verbatim:</p>
+
+<pre><code>1 1552:1080:184:0
+29 1440:1080:240:0</code></pre>
+
+<p>Two lines and they are the whole section: the default answers once for the file and the answer is
+frame 0's; re-detecting answers 29 times and lands on the truth.</p>
+
 <h2>Reproducing it</h2>
 
-<p>Everything above runs in about a second except the 4× timings. Pillow only; no ffmpeg needed for
-the metrics. The scene is deterministic.</p>
+<p>Experiments 1 and 2 run in about a second except the 4× timings, and need only Pillow and numpy.
+Experiments 3–5 need ffmpeg. The scene is deterministic, so the numbers below are exact.</p>
 
 <pre><code>import numpy as np
 from PIL import Image, ImageDraw
@@ -457,6 +646,10 @@ bar (crush it to true black) over raising the threshold.</li>
 <code>round=16</code> trims real picture rows to a multiple of 16.</li>
 <li><strong>Gate on an edge strip, not the whole frame.</strong> 8 output pixels at the active
 boundary catches a 38 dB defect that a whole-frame PSNR gate reports as 0.01 dB.</li>
+<li><strong>Re-detect per frame — the default rectangle can only grow.</strong> Without
+<code>reset=1</code> the rectangle is a running union that never tightens: a clip that opens
+full-frame and settles into 4:3 is never cropped at all. Measured 1 correct frame out of 298 on a
+narrowing clip, 298/298 with <code>reset=1</code>, at no measurable cost.</li>
 <li><strong>Check the axis twice.</strong> Pillarboxing and letterboxing have different failure
 modes only in which scan direction you measure; the crop rectangle is the same operation, but a
 source can have bars on both axes and <code>cropdetect</code> will happily return a rectangle that
@@ -469,13 +662,18 @@ same order applies: the upscaler never needs to know the bars existed. The
 be clever about frame geometry, which is the behaviour you want here.</p>
 
 <footer>
-<p>All figures measured on 18 November 2026 with Pillow 12.2.0, numpy 1.26.4 and ffmpeg 6.1.1 on
+<p>All figures measured on 18–19 November 2026 with Pillow 12.2.0, numpy 1.26.4 and ffmpeg 6.1.1 on
 Linux. The test scene is generated deterministically from the snippets above; no figures here are
-estimated. Three negative results are reported as measured rather than smoothed over: whole-frame
+estimated. Four negative results are reported as measured rather than smoothed over: whole-frame
 PSNR cannot see the crop-edge defect (Experiment 2), raising <code>cropdetect</code>'s limit eats
-picture instead of bars (Experiments 3 and 4), and the rule this page originally published for
-<code>cropdetect</code> was wrong and did not reproduce (Experiment 4). The last one is stated
-because a wrong rule that reproduces as "correct" is more dangerous than a missing one.</p>
+picture instead of bars (Experiments 3 and 4), the rule this page originally published for
+<code>cropdetect</code> was wrong and did not reproduce (Experiment 4), and on a clip the rectangle
+only ever grows, so bars that appear after frame 0 are never cropped (Experiment 5). The third is
+stated because a wrong rule that reproduces as "correct" is more dangerous than a missing one. The
+fourth contradicts the hypothesis I started with — I expected the rectangle to be frozen after frame
+0, and the x1/x2 dump shows the scans do not run at all once the box is full-frame. The cost is the
+same, 1 correct frame out of 298, but the mechanism is the opposite, and it is written here as
+measured rather than as I first assumed.</p>
 
 <nav class="sisternav" aria-label="More measured upscaling guides">
 <p>More measured guides</p>
