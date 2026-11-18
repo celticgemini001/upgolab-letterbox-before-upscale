@@ -620,7 +620,7 @@ luma, then:</p>
 
 <pre><code>for lim in 16 24 32 40 48; do
   ffmpeg -v info -loop 1 -t 0.4 -i framed.png \
-    -vf "cropdetect=limit=$lim:round=2" -f null - 2>&gt;&amp;1 \
+    -vf "cropdetect=limit=$lim:round=2" -f null - 2&gt;&amp;1 \
     | grep -o 'crop=[0-9:]*' | tail -1
 done</code></pre>
 
